@@ -1,0 +1,230 @@
+import os
+import json
+import hashlib
+from google import genai
+from pydantic import BaseModel, Field
+
+# ==============================================================================
+# PHASE 1: Define the Structured Output Schema (The Digital Evidence Protocol)
+# This ensures the output is always a valid, forensically sound JSON structure.
+# ==============================================================================
+
+class CoC_Disposition(BaseModel):
+    """Schema for a single entry in the Chain of Custody log."""
+    transfer_time_utc: str = Field(description="The exact UTC timestamp of the evidence transfer (YYYY-MM-DD HH:MM:SS).")
+    transferred_from: str = Field(description="The previous custodian of the evidence (e.g., Analyst Name).")
+    transferred_to: str = Field(description="The next custodian or storage location (e.g., Secure Storage Server ID).")
+    purpose: str = Field(description="The reason for the transfer (e.g., Secure Archival, Hash Verification).")
+
+class ChainOfCustody(BaseModel):
+    """Main schema for the combined Forensic Report, including Triage and CoC."""
+    document_title: str = Field(default="Chain of Custody & Root Cause Report")
+    incident_id: str = Field(description="Unique ID for the incident (e.g., IR-2025-09-08-044).")
+    evidence_item: str = Field(description="Description of the evidence acquired (e.g., HR-Server-01 RAM and Registry Dump).")
+    acquisition_hash_sha256: str = Field(description="The secure SHA256 hash of the evidence image.")
+    time_acquired_utc: str = Field(description="The exact time the live acquisition began.")
+    acquired_by_analyst: str = Field(description="The name of the forensic analyst who performed the acquisition (SUDHARSAN T).")
+    
+    # Analysis fields based on your investigative skills
+    root_cause_deduction_summary: str = Field(description="A concise summary (3-4 sentences) explaining the final point of compromise based on the raw artifacts.")
+    threat_profile_criminology: str = Field(description="Applying Criminology principles: The likely attacker motive and opportunity (e.g., Financial motive via Phishing opportunity).")
+    
+    disposition_log: list[CoC_Disposition] = Field(description="A list of initial transfer logs for the evidence.")
+
+
+# ==============================================================================
+# PHASE 2: The Core Agent Function (Gemini API Call)
+# ==============================================================================
+
+def analyze_and_report(raw_forensic_data: str):
+    """Sends raw forensic data to Gemini for structured analysis."""
+    
+    try:
+        # Client initializes using the GEMINI_API_KEY environment variable
+        client = genai.Client()
+    except Exception as e:
+        return f"Error initializing Gemini client. Make sure GEMINI_API_KEY is set: {e}"
+
+    system_instruction = (
+        "You are an expert Certified Digital Forensic Analyst and Criminologist (SUDHARSAN T). "
+        "Your task is to analyze the raw forensic data provided, perform a precise Root Cause Deduction, "
+        "and generate a formal, structured report that strictly adheres to the provided JSON schema."
+        "You must apply Threat Profile Criminology principles to determine motive and opportunity."
+    )
+
+    user_prompt = (
+        f"**RAW ACQUISITION ARTIFACTS:**\n{raw_forensic_data}\n\n"
+        "Analyze this data and generate the full, structured Chain of Custody and Root Cause Report."
+    )
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=user_prompt,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=ChainOfCustody,
+            )
+        )
+        return response.text
+    except Exception as e:
+        return f"Error running Gemini API: {e}"
+
+# ==============================================================================
+# PHASE 3: Utility Functions (Hashing and Report Formatting)
+# ==============================================================================
+
+def calculate_file_sha256(filepath):
+    """Calculates the SHA256 hash of a file for integrity verification."""
+    hasher = hashlib.sha256()
+    try:
+        with open(filepath, 'rb') as file:
+            while True:
+                # Read data in 64KB chunks
+                chunk = file.read(65536)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        return f"HASH ERROR: {e}"
+
+
+def generate_human_readable_report(parsed_data: dict):
+    """Formats the structured JSON data into a clean, human-readable report."""
+    
+    doc_title = parsed_data.get('document_title', 'Forensic Analysis Report')
+    incident_id = parsed_data.get('incident_id', 'N/A')
+    evidence_item = parsed_data.get('evidence_item', 'N/A')
+    acquisition_hash = parsed_data.get('acquisition_hash_sha256', 'N/A')
+    analyst = parsed_data.get('acquired_by_analyst', 'N/A')
+    root_cause = parsed_data.get('root_cause_deduction_summary', 'No summary provided.')
+    threat_profile = parsed_data.get('threat_profile_criminology', 'No profile provided.')
+    disposition_log = parsed_data.get('disposition_log', [])
+    
+    report_lines = [
+        "=" * 80,
+        f"        *** {doc_title.upper()} *** ",
+        f"                   ANALYSIS BY: {analyst}                    ",
+        "=" * 80,
+        
+        "\n--- 1. INCIDENT AND EVIDENCE SUMMARY ---\n",
+        f"Incident ID:        {incident_id}",
+        f"Evidence Item:      {evidence_item}",
+        f"Acquisition Hash:   {acquisition_hash}",
+        f"Time Acquired:      {parsed_data.get('time_acquired_utc', 'N/A')}",
+        
+        "\n--- 2. ROOT CAUSE DEDUCTION ---\n",
+        f"Root Cause Summary:\n{root_cause}\n",
+        
+        "\n--- 3. THREAT PROFILE CRIMINOLOGY ---\n",
+        f"Attacker Profile:\n{threat_profile}\n",
+        
+        "\n--- 4. INITIAL CHAIN OF CUSTODY (CoC) LOG ---\n",
+    ]
+    
+    if disposition_log:
+        for entry in disposition_log:
+            report_lines.append(f"  [{entry.get('transfer_time_utc', 'N/A')}]")
+            report_lines.append(f"    FROM: {entry.get('transferred_from', 'N/A')}")
+            report_lines.append(f"    TO:   {entry.get('transferred_to', 'N/A')}")
+            report_lines.append(f"    NOTE: {entry.get('purpose', 'N/A')}\n")
+    else:
+        report_lines.append("No initial transfer logs were generated.")
+        
+    report_lines.append("=" * 80)
+
+    return "\n".join(report_lines)
+
+
+# ==============================================================================
+# PHASE 4: Execution
+# ==============================================================================
+
+if __name__ == "__main__":
+    
+    # --- Data Input Abstraction ---
+    # The script now checks for a 'forensic_artifacts_sample.txt' file for real-world simulation.
+    input_file_path = "forensic_artifacts_sample.txt" 
+    
+    # Fallback simulated data (used if the file above is not found)
+    fallback_data = r"""
+Incident ID: IR-2025-09-08-044
+Target System: HR-Server-01 (Windows 2019)
+Acquisition Analyst: SUDHARSAN T
+Acquisition Time (UTC): 2025-09-08 14:30:15
+Evidence Hash (Simulated SHA256): 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b
+
+KEY ARTIFACT SNIPPETS:
+- Suspicious Process: 'powershell.exe' running under a low-privilege service account.
+- Registry Key Persistence: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\Updater = C:\Users\Public\update.exe
+- External Connection Log: Outbound TCP connection established to 203.0.113.44 on port 8080 (Common C2 port).
+- Initial Access Log: User opened a file named 'Invoice-Q3-2025.doc' 30 seconds before process start.
+"""
+    
+    # Try to read the file, otherwise use the fallback data
+    try:
+        print(f"Attempting to read volatile data from: {input_file_path}")
+        with open(input_file_path, 'r', encoding='utf-8') as f:
+            raw_forensic_data = f.read()
+    except FileNotFoundError:
+        print(f"Warning: Input file '{input_file_path}' not found. Using simulated data for analysis.")
+        raw_forensic_data = fallback_data
+        
+    print("--- Running The Forensic Integrity Sentinel ---")
+    print("Feeding data to Gemini 2.5 Flash...") 
+    
+    # 1. Run the analysis
+    final_report_json = analyze_and_report(raw_forensic_data)
+
+    # 2. Display the result in the console and parse the JSON
+    print("\n" + "="*70)
+    print("GEMINI AI STRUCTURED OUTPUT (FORENSIC REPORT JSON)")
+    print("="*70)
+    
+    parsed_json = {} 
+    
+    try:
+        parsed_json = json.loads(final_report_json)
+        pretty_json = json.dumps(parsed_json, indent=4)
+        print(pretty_json)
+    except json.JSONDecodeError:
+        print("Raw output (not valid JSON):")
+        print(final_report_json)
+        
+    # 3. Save the report and generate the human-readable summary
+    if parsed_json:
+        report_filename = f"CoC_IR-{parsed_json.get('incident_id', 'Unknown')}.json"
+        
+        try:
+            # Save the JSON file
+            with open(report_filename, "w", encoding="utf-8") as f:
+                json.dump(parsed_json, f, indent=4)
+            print(f"\n--- SUCCESS ---")
+            print(f"Structured Forensic Report saved to: {report_filename}")
+
+            # INTEGRITY VERIFICATION: Calculate and print the hash of the saved file
+            json_hash = calculate_file_sha256(report_filename)
+            print(f"JSON File Integrity Hash (SHA256): {json_hash}")
+            
+            # 4. Generate and save the Human-Readable Summary Report
+            print("\n" + "="*80)
+            print("FINAL INVESTIGATIVE REPORT SUMMARY (Human-Readable)")
+            print("="*80)
+            
+            summary_report = generate_human_readable_report(parsed_json)
+            print(summary_report)
+            
+            text_filename = report_filename.replace(".json", ".txt")
+            with open(text_filename, "w", encoding="utf-8") as f:
+                f.write(summary_report)
+            print(f"\nSummary Report saved to: {text_filename}")
+
+        except Exception as e:
+            print(f"\n--- FILE SAVE ERROR ---")
+            print(f"Could not save file {report_filename}: {e}")
+            
+    else:
+        print("\n--- REPORT NOT GENERATED ---")
+        print("Could not generate a structured or final report because the API failed or returned invalid data.")
